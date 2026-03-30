@@ -58,22 +58,65 @@ export async function captureThought(input: CaptureThoughtInput): Promise<void> 
   })
 
   const rawBody = await response.text()
+  const contentType = response.headers.get("content-type") ?? ""
 
   if (!response.ok) {
     throw new Error(`Memory Goblin HTTP ${response.status}: ${truncate(rawBody)}`)
   }
 
-  let payload: JsonRpcFailure | JsonRpcSuccess
-
-  try {
-    payload = JSON.parse(rawBody) as JsonRpcFailure | JsonRpcSuccess
-  } catch {
-    throw new Error(`Memory Goblin returned invalid JSON: ${truncate(rawBody)}`)
-  }
+  const payload = parseMcpPayload(rawBody, contentType)
 
   if ("error" in payload) {
     throw new Error(payload.error.message ?? "Memory Goblin returned an unknown error.")
   }
+}
+
+function parseMcpPayload(rawBody: string, contentType: string): JsonRpcFailure | JsonRpcSuccess {
+  try {
+    return JSON.parse(rawBody) as JsonRpcFailure | JsonRpcSuccess
+  } catch {
+    if (contentType.includes("text/event-stream") || rawBody.includes("event:")) {
+      const ssePayload = parseSsePayload(rawBody)
+
+      if (ssePayload) {
+        return ssePayload
+      }
+    }
+
+    throw new Error(`Memory Goblin returned invalid JSON: ${truncate(rawBody)}`)
+  }
+}
+
+function parseSsePayload(rawBody: string): JsonRpcFailure | JsonRpcSuccess | null {
+  const events = rawBody
+    .split(/\r?\n\r?\n/)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+
+  for (const event of events) {
+    const dataLines = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+
+    if (dataLines.length === 0) {
+      continue
+    }
+
+    const data = dataLines.join("\n")
+
+    try {
+      const payload = JSON.parse(data) as JsonRpcFailure | JsonRpcSuccess
+
+      if ("result" in payload || "error" in payload) {
+        return payload
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
 }
 
 function truncate(value: string, limit = 180): string {
